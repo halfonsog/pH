@@ -1,410 +1,207 @@
 <!DOCTYPE html>
-<html lang="es">
+<html>
 
 <head>
   <meta charset="UTF-8">
-  <title>PR Fugacity</title>
+  <title>pH / Fugacity Calculator</title>
 </head>
 
 <body>
 
-  <h2>Test PR EOS</h2>
-  <button onclick="run()">Calcular</button>
+  <h2>Test</h2>
+  <button onclick="runTest()">Run</button>
 
   <script>
 
-    // ======================
+    // =======================
     // CONSTANTES
-    // ======================
+    // =======================
     const R = 0.08314;
-    const gamma = 1.16;
-    //const P_eff_factor = 0.84;
 
-    // ======================
-    // COMPONENTES
-    // ======================
-    const CO2 = { Tc: 304.2, Pc: 73.7, omega: 0.225 };
-    const H2S = { Tc: 373.2, Pc: 89.4, omega: 0.1 };
-    const CH4 = { Tc: 190.6, Pc: 46.0, omega: 0.008 };
-    const H2O = { Tc: 647.3, Pc: 220.5, omega: 0.344 };
+    const CO2 = { name: "CO2", Tc: 304.2, Pc: 73.7, w: 0.225 };
+    const H2S = { name: "H2S", Tc: 373.2, Pc: 89.4, w: 0.1 };
+    const CH4 = { name: "CH4", Tc: 190.6, Pc: 46.0, w: 0.008 };
+    const H2O = { name: "H2O", Tc: 647.3, Pc: 220.5, w: 0.344 };
 
-    // ======================
-    // kij (DEL EXCEL)
-    // ======================
     const kij = {
-      CO2: { CO2: 0, H2S: 0.099, CH4: 0.100, H2O: 0.190 },
+      CO2: { CO2: 0, H2S: 0.099, CH4: 0.1, H2O: 0.19 },
       H2S: { CO2: 0.099, H2S: 0, CH4: 0.084, H2O: 0.105 },
-      CH4: { CO2: 0.100, H2S: 0.084, CH4: 0, H2O: 0.479 },
-      H2O: { CO2: 0.190, H2S: 0.105, CH4: 0.479, H2O: 0 }
+      CH4: { CO2: 0.1, H2S: 0.084, CH4: 0, H2O: 0.479 },
+      H2O: { CO2: 0.19, H2S: 0.105, CH4: 0.479, H2O: 0 }
     };
 
-    const corrParams = {
-      CO2: { eta: -0.114535, tau: -5.279063, beta: 6.187967 },
-      H2S: { eta: -0.2029, tau: -13.4046, beta: 13.8582 }
-    };
-
-    // ======================
-    // INPUT (CASO TEST)
-    // ======================
-    function getCtx() {
-      return {
-        D7: 25 + 273.15, // K
-        D8: 100,         // bar
-        D9: 10,          // %
-        D10: 1           // %
-      };
-    }
-
-    // ======================
+    // =======================
     // UTIL
-    // ======================
+    // =======================
     function logCell(name, val) {
-      console.log(name + " =", val);
+      console.log(name, "=", val);
     }
 
-    function memo(ctx, key, fn) {
-      if (!ctx._m) ctx._m = {};
-      if (ctx._m[key] !== undefined) return ctx._m[key];
-      const v = fn();
-      ctx._m[key] = v;
-      logCell(key, v);
-      return v;
+    // =======================
+    // PR EOS
+    // =======================
+    function calc_ai(comp, T) {
+      const Tr = (T + 273.15) / comp.Tc;
+      const kappa = 0.37464 + 1.54226 * comp.w - 0.26992 * comp.w * comp.w;
+      const alpha = Math.pow(1 + kappa * (1 - Math.sqrt(Tr)), 2);
+
+      return 0.45724 * R * R * comp.Tc * comp.Tc / comp.Pc * alpha;
     }
 
-    // ======================
-    // PR FUNCIONES
-    // ======================
-    function kappa(w) {
-      return 0.37464 + 1.54226 * w - 0.26992 * w * w;
+    function calc_bi(comp) {
+      return 0.07780 * R * comp.Tc / comp.Pc;
     }
 
-    function alpha(T, Tc, w) {
-      const Tr = T / Tc;
-      return Math.pow(1 + kappa(w) * (1 - Math.sqrt(Tr)), 2);
-    }
+    // =======================
+    // MEZCLA
+    // =======================
+    function A_real(comp, T) {
+      let sum = 0;
 
-    function calc_ai(p, T) {
-      return 0.45724 * (R * R * p.Tc * p.Tc / p.Pc) * alpha(T, p.Tc, p.omega);
-    }
+      for (let i of comp) {
+        for (let j of comp) {
+          const ai = calc_ai(i.p, T);
+          const aj = calc_ai(j.p, T);
+          const aij = Math.sqrt(ai * aj) * (1 - kij[i.name][j.name]);
 
-    function calc_bi(p) {
-      return 0.07780 * (R * p.Tc / p.Pc);
-    }
-
-    // ======================
-    // COMPOSICIÓN
-    // ======================
-    function composition(ctx) {
-
-      const eq = equilibrateGas(ctx);
-
-      return [
-        { name: "CO2", y: eq.CO2, p: CO2 },
-        { name: "H2S", y: eq.H2S, p: H2S },
-        { name: "CH4", y: eq.CH4, p: CH4 },
-        { name: "H2O", y: eq.H2O, p: H2O }
-      ];
-    }
-
-
-    // ======================
-    // A y B mezcla
-    // ======================
-    function A_real(ctx) {
-      return memo(ctx, "A_mix_real", () => {
-        const T = ctx.D7;
-        const comp = composition(ctx);
-
-        let A = 0;
-
-        for (let i = 0; i < comp.length; i++) {
-          for (let j = 0; j < comp.length; j++) {
-
-            const ai = calc_ai(comp[i].p, T);
-            const aj = calc_ai(comp[j].p, T);
-
-            const kij_ij = kij[comp[i].name][comp[j].name];
-
-            A += comp[i].y * comp[j].y *
-              Math.sqrt(ai * aj) * (1 - kij_ij);
-          }
+          sum += i.y * j.y * aij;
         }
-
-        return A;
-      });
+      }
+      return sum;
     }
 
-    function A_red(ctx) {
-      return memo(ctx, "A_mix", () => {
-        const T = ctx.D7;
-        const P = ctx.D8;
-
-        return A_real(ctx) * P / (R * R * T * T);
-      });
+    function B_mix(comp) {
+      let sum = 0;
+      for (let i of comp) {
+        sum += i.y * calc_bi(i.p);
+      }
+      return sum;
     }
 
-    function B_mix(ctx) {
-      return memo(ctx, "B_mix", () => {
-        const T = ctx.D7;
-        const P = ctx.D8;
-        const comp = composition(ctx);
-
-        let B = 0;
-
-        for (let c of comp) {
-          B += c.y * calc_bi(c.p);
-        }
-
-        return B * P / (R * T);
-      });
+    function A_red(A, T, P) {
+      return A * P / (R * R * (T + 273.15) * (T + 273.15));
     }
 
-    // ======================
-    // SOLVER CÚBICO PR
-    // ======================
+    function B_red(B, T, P) {
+      return B * P / (R * (T + 273.15));
+    }
+
+    // =======================
+    // SOLVER Z
+    // =======================
     function solveZ(A, B) {
+      let bestZ = 1;
+      let minErr = 1e9;
 
-      const c2 = -(1 - B);
-      const c1 = A - 3 * B * B - 2 * B;
-      const c0 = -(A * B - B * B - B * B * B);
+      for (let z = 0.01; z < 1.5; z += 0.001) {
+        const f = z * z * z - (1 - B) * z * z + (A - 3 * B * B - 2 * B) * z - (A * B - B * B - B * B * B);
+        const err = Math.abs(f);
 
-      const Q = (3 * c1 - c2 * c2) / 9;
-      const R = (9 * c2 * c1 - 27 * c0 - 2 * c2 * c2 * c2) / 54;
-      const D = Q * Q * Q + R * R;
-
-      let roots = [];
-
-      if (D >= 0) {
-        // una raíz real
-        const S = Math.cbrt(R + Math.sqrt(D));
-        const T = Math.cbrt(R - Math.sqrt(D));
-
-        const Z = -c2 / 3 + (S + T);
-        roots = [Z];
-      } else {
-        // tres raíces reales
-        const theta = Math.acos(R / Math.sqrt(-Q * Q * Q));
-
-        const r = 2 * Math.sqrt(-Q);
-
-        const Z1 = r * Math.cos(theta / 3) - c2 / 3;
-        const Z2 = r * Math.cos((theta + 2 * Math.PI) / 3) - c2 / 3;
-        const Z3 = r * Math.cos((theta + 4 * Math.PI) / 3) - c2 / 3;
-
-        roots = [Z1, Z2, Z3];
+        if (err < minErr) {
+          minErr = err;
+          bestZ = z;
+        }
       }
 
-      console.log("Z roots (real):", roots);
-
-      return Math.max(...roots); // fase gas
+      return bestZ;
     }
 
-    // ======================
-    // Z
-    // ======================
-    function Z(ctx) {
-      return memo(ctx, "Z_mix", () => {
-        return solveZ(A_red(ctx), B_mix(ctx));
-      });
-    }
+    // =======================
+    // PHI
+    // =======================
+    function phi_i(comp_i, comp, T, P) {
 
-    // ======================
-    // Constantes de solubilidad (tipo Duan simplificado)
-    // ======================
-    function K_CO2(T, P) {
-      // T en K, P en bar
+      const A_r = A_real(comp, T);
+      const B = B_mix(comp);
 
-      const Tc = T;
-      const Pm = P;
+      const A = A_red(A_r, T, P);
+      const B_r = B_red(B, T, P);
 
-      const lnK =
-        -58.0931 +
-        90.5069 * (100 / Tc) +
-        22.2940 * Math.log(Tc / 100) +
-        Pm * (
-          0.027766 -
-          0.025888 * (Tc / 100) +
-          0.0050578 * Math.pow(Tc / 100, 2)
-        );
+      const Z = solveZ(A, B_r);
 
-      return Math.exp(lnK);
-    }
+      const ai = calc_ai(comp_i.p, T);
+      const bi = calc_bi(comp_i.p);
 
-    function K_H2S(T, P) {
+      let sum = 0;
 
-      const Tc = T;
-
-      const lnK =
-        -60 +
-        95 * (100 / Tc) +
-        25 * Math.log(Tc / 100) +
-        0.02 * P;
-
-      return Math.exp(lnK);
-    }
-
-    function equilibrateGas(ctx) {
-
-      let y_co2 = ctx.D9 / 100;
-      let y_h2s = ctx.D10 / 100;
-
-      let y_h2o = 0.00034;
-      let y_ch4 = 1 - y_co2 - y_h2s - y_h2o;
-
-      const T = ctx.D7;
-      const P = ctx.D8;
-
-      for (let iter = 0; iter < 20; iter++) {
-
-        const comp = [
-          { name: "CO2", y: y_co2, p: CO2 },
-          { name: "H2S", y: y_h2s, p: H2S },
-          { name: "CH4", y: y_ch4, p: CH4 },
-          { name: "H2O", y: y_h2o, p: H2O }
-        ];
-
-        // fugacidades
-        const f_co2 = y_co2 * P * phi_i(ctx, comp[0]);
-        const f_h2s = y_h2s * P * phi_i(ctx, comp[1]);
-
-        // solubilidad
-        const m_co2 = K_CO2(T, P) * f_co2;
-        const m_h2s = K_H2S(T, P) * f_h2s;
-
-        // ajuste (simple)
-        const factor_co2 = 1 / (1 + m_co2);
-        const factor_h2s = 1 / (1 + m_h2s);
-
-        const y_co2_new = y_co2 * factor_co2;
-        const y_h2s_new = y_h2s * factor_h2s;
-
-        // normalizar
-        const total = y_co2_new + y_h2s_new + y_ch4 + y_h2o;
-
-        y_co2 = y_co2_new / total;
-        y_h2s = y_h2s_new / total;
-        y_ch4 = y_ch4 / total;
-
-        // convergencia simple
-        if (Math.abs(y_co2_new - y_co2) < 1e-6) break;
+      for (let j of comp) {
+        const aj = calc_ai(j.p, T);
+        const aij = Math.sqrt(ai * aj) * (1 - kij[comp_i.name][j.name]);
+        sum += j.y * aij;
       }
 
-      return {
-        CO2: y_co2,
-        H2S: y_h2s,
-        CH4: y_ch4,
-        H2O: y_h2o
-      };
+      const logTerm = Math.log(
+        (Z + (1 + Math.sqrt(2)) * B_r) /
+        (Z - (Math.sqrt(2) - 1) * B_r)
+      );
+
+      const term1 = (bi / B) * (Z - 1);
+      const term2 = -Math.log(Z - B_r);
+
+      const term3 =
+        (A / (2 * Math.sqrt(2) * B_r)) *
+        ((2 * sum / A_r) - (bi / B)) *
+        logTerm;
+
+      const lnphi = term1 + term2 - term3;
+
+      return Math.exp(lnphi);
     }
 
-    // ======================
-    // FUGACIDAD
-    // ======================
-    function phi_i(ctx, comp_i) {
-      return memo(ctx, "phi_" + comp_i.name, () => {
+    // =======================
+    // CALCULO DIRECTO (SIN EQUILIBRIO)
+    // =======================
+    function compute(ctx) {
 
-        const comp = composition(ctx);
-        const T = ctx.D7;
+      const T = ctx.T;
+      const P = ctx.P;
 
-        const A_real_val = A_real(ctx);   // ← ESTE es el importante
-        const A_red_val = A_red(ctx);    // ← este solo para fuera
-        const B = B_mix(ctx);
-        const Zm = Z(ctx);
+      const yCO2 = ctx.CO2 / 100;
+      const yH2S = ctx.H2S / 100;
+      const yH2O = 0.00034;
+      const yCH4 = 1 - yCO2 - yH2S - yH2O;
 
-        const ai = calc_ai(comp_i.p, T);
-        const bi = calc_bi(comp_i.p);
+      const comp = [
+        { name: "CO2", y: yCO2, p: CO2 },
+        { name: "H2S", y: yH2S, p: H2S },
+        { name: "CH4", y: yCH4, p: CH4 },
+        { name: "H2O", y: yH2O, p: H2O }
+      ];
 
-        // Σ yj * aij
-        let sum_aij = 0;
+      const phiCO2 = phi_i(comp[0], comp, T, P);
+      const phiH2S = phi_i(comp[1], comp, T, P);
 
-        for (let j of comp) {
-          const aj = calc_ai(j.p, T);
-          const kij_ij = kij[comp_i.name][j.name];
+      const H13 = yCO2 * P * phiCO2;
+      const H18 = yH2S * P * phiH2S;
 
-          const aij = Math.sqrt(ai * aj) * (1 - kij_ij);
-
-          sum_aij += j.y * aij;
-        }
-
-        // términos PR
-        const term1 = (bi / B) * (Zm - 1);
-        const term2 = -Math.log(Zm - B);
-
-        // ⚠️ FORMULA EXACTA (IMPORTANTE)
-        const logTerm = Math.log(
-          (Zm + (1 + Math.sqrt(2)) * B) /
-          (Zm - (Math.sqrt(2) - 1) * B)
-        );
-
-        logCell("logTerm_" + comp_i.name, logTerm);
-
-        // calcular A_ij en forma reducida
-        let sum_aij_red = 0;
-
-        for (let j of comp) {
-          const aj = calc_ai(j.p, T);
-          const kij_ij = kij[comp_i.name][j.name];
-
-          const aij = Math.sqrt(ai * aj) * (1 - kij_ij);
-
-          // convertir a forma reducida
-          sum_aij_red += j.y * aij * ctx.D8 / (R * R * T * T);
-        }
-
-        // ahora TODO consistente
-        const term3 =
-          (1 / (2 * Math.sqrt(2) * B)) *
-          ((2 * sum_aij_red / A_red_val) - (bi / B)) *
-          logTerm;
-
-
-        const lnphi = term1 + term2 - term3;
-
-        logCell("ln_phi_" + comp_i.name, lnphi);
-
-        return Math.exp(lnphi);
-      });
+      logCell("phi_CO2", phiCO2);
+      logCell("phi_H2S", phiH2S);
+      logCell("H13", H13);
+      logCell("H18", H18);
     }
 
-    // ======================
-    // RESULTADOS
-    // ======================
-    function H13(ctx) {
-      return memo(ctx, "H13", () => {
+    // =======================
+    // TEST
+    // =======================
+    function runTest() {
 
-        const base =
-          (ctx.D9 / 100) *
-          ctx.D8 *
-          phi_i(ctx, { name: "CO2", p: CO2 });
-
-        return base;
-      });
-    }
-
-
-    function H18(ctx) {
-      return memo(ctx, "H18", () => {
-
-        const base =
-          (ctx.D10 / 100) *
-          ctx.D8 *
-          phi_i(ctx, { name: "H2S", p: H2S });
-
-        return base;
-      });
-    }
-
-
-    // ======================
-    // RUN
-    // ======================
-    function run() {
       console.clear();
 
-      const ctx = getCtx();
+      console.log("=== TEST 10 bar ===");
+      compute({
+        T: 25,
+        P: 10,
+        CO2: 10,
+        H2S: 1
+      });
 
-      H13(ctx);
-      H18(ctx);
+      console.log("=== TEST 100 bar ===");
+      compute({
+        T: 25,
+        P: 100,
+        CO2: 10,
+        H2S: 1
+      });
     }
 
   </script>
