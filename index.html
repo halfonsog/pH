@@ -95,18 +95,17 @@
     // COMPOSICIÓN
     // ======================
     function composition(ctx) {
-      const y_co2 = ctx.D9 / 100;
-      const y_h2s = ctx.D10 / 100;
-      const y_h2o = 0.00034;
-      const y_ch4 = 1 - y_co2 - y_h2s - y_h2o;
+
+      const eq = equilibrateGas(ctx);
 
       return [
-        { name: "CO2", y: y_co2, p: CO2 },
-        { name: "H2S", y: y_h2s, p: H2S },
-        { name: "CH4", y: y_ch4, p: CH4 },
-        { name: "H2O", y: y_h2o, p: H2O }
+        { name: "CO2", y: eq.CO2, p: CO2 },
+        { name: "H2S", y: eq.H2S, p: H2S },
+        { name: "CH4", y: eq.CH4, p: CH4 },
+        { name: "H2O", y: eq.H2O, p: H2O }
       ];
     }
+
 
     // ======================
     // A y B mezcla
@@ -114,7 +113,7 @@
     function A_real(ctx) {
       return memo(ctx, "A_mix_real", () => {
         const T = ctx.D7;
-        const comp = corrected_y(ctx);  // composition(ctx);
+        const comp = composition(ctx);
 
         let A = 0;
 
@@ -210,12 +209,101 @@
     }
 
     // ======================
+    // Constantes de solubilidad (tipo Duan simplificado)
+    // ======================
+    function K_CO2(T, P) {
+      // T en K, P en bar
+
+      const Tc = T;
+      const Pm = P;
+
+      const lnK =
+        -58.0931 +
+        90.5069 * (100 / Tc) +
+        22.2940 * Math.log(Tc / 100) +
+        Pm * (
+          0.027766 -
+          0.025888 * (Tc / 100) +
+          0.0050578 * Math.pow(Tc / 100, 2)
+        );
+
+      return Math.exp(lnK);
+    }
+
+    function K_H2S(T, P) {
+
+      const Tc = T;
+
+      const lnK =
+        -60 +
+        95 * (100 / Tc) +
+        25 * Math.log(Tc / 100) +
+        0.02 * P;
+
+      return Math.exp(lnK);
+    }
+
+    function equilibrateGas(ctx) {
+
+      let y_co2 = ctx.D9 / 100;
+      let y_h2s = ctx.D10 / 100;
+
+      let y_h2o = 0.00034;
+      let y_ch4 = 1 - y_co2 - y_h2s - y_h2o;
+
+      const T = ctx.D7;
+      const P = ctx.D8;
+
+      for (let iter = 0; iter < 20; iter++) {
+
+        const comp = [
+          { name: "CO2", y: y_co2, p: CO2 },
+          { name: "H2S", y: y_h2s, p: H2S },
+          { name: "CH4", y: y_ch4, p: CH4 },
+          { name: "H2O", y: y_h2o, p: H2O }
+        ];
+
+        // fugacidades
+        const f_co2 = y_co2 * P * phi_i(ctx, comp[0]);
+        const f_h2s = y_h2s * P * phi_i(ctx, comp[1]);
+
+        // solubilidad
+        const m_co2 = K_CO2(T, P) * f_co2;
+        const m_h2s = K_H2S(T, P) * f_h2s;
+
+        // ajuste (simple)
+        const factor_co2 = 1 / (1 + m_co2);
+        const factor_h2s = 1 / (1 + m_h2s);
+
+        const y_co2_new = y_co2 * factor_co2;
+        const y_h2s_new = y_h2s * factor_h2s;
+
+        // normalizar
+        const total = y_co2_new + y_h2s_new + y_ch4 + y_h2o;
+
+        y_co2 = y_co2_new / total;
+        y_h2s = y_h2s_new / total;
+        y_ch4 = y_ch4 / total;
+
+        // convergencia simple
+        if (Math.abs(y_co2_new - y_co2) < 1e-6) break;
+      }
+
+      return {
+        CO2: y_co2,
+        H2S: y_h2s,
+        CH4: y_ch4,
+        H2O: y_h2o
+      };
+    }
+
+    // ======================
     // FUGACIDAD
     // ======================
     function phi_i(ctx, comp_i) {
       return memo(ctx, "phi_" + comp_i.name, () => {
 
-        const comp = corrected_y(ctx);  // composition(ctx);
+        const comp = composition(ctx);
         const T = ctx.D7;
 
         const A_real_val = A_real(ctx);   // ← ESTE es el importante
@@ -278,48 +366,6 @@
       });
     }
 
-    function correction_ln(gas, T, P) {
-
-      const p = corrParams[gas];
-
-      const term_eta = p.eta;
-      const term_tau = p.tau / T;
-
-      // 🔥 escala controlada
-      const term_beta = p.beta * Math.log(1 + P / 10);
-
-      const result = term_eta + term_tau + term_beta;
-
-      console.log("corr_ln_" + gas, result);
-
-      return result;
-    }
-
-    function corrected_y(ctx) {
-
-      const P = ctx.D8;
-
-      const y_co2 = ctx.D9 / 100;
-      const y_h2s = ctx.D10 / 100;
-
-      // 🔥 efecto de disolución (aprox inicial)
-      const factor = 1 / (1 + 0.02 * P);
-
-      const y_co2_corr = y_co2 * factor;
-      const y_h2s_corr = y_h2s * factor;
-
-      const y_h2o = 0.00034;
-      const y_ch4 = 1 - y_co2_corr - y_h2s_corr - y_h2o;
-
-      return [
-        { name: "CO2", y: y_co2_corr, p: CO2 },
-        { name: "H2S", y: y_h2s_corr, p: H2S },
-        { name: "CH4", y: y_ch4, p: CH4 },
-        { name: "H2O", y: y_h2o, p: H2O }
-      ];
-    }
-
-
     // ======================
     // RESULTADOS
     // ======================
@@ -331,13 +377,7 @@
           ctx.D8 *
           phi_i(ctx, { name: "CO2", p: CO2 });
 
-        const corr = Math.exp(
-          correction_ln("CO2", ctx.D7, ctx.D8)
-        );
-
-        logCell("corr_CO2", corr);
-
-        return base * corr;
+        return base;
       });
     }
 
@@ -350,13 +390,7 @@
           ctx.D8 *
           phi_i(ctx, { name: "H2S", p: H2S });
 
-        const corr = Math.exp(
-          correction_ln("H2S", ctx.D7, ctx.D8)
-        );
-
-        logCell("corr_H2S", corr);
-
-        return base * corr;
+        return base;
       });
     }
 
